@@ -1,23 +1,33 @@
-# Move to the directory containing this script
-cd "$(dirname "$0")"
+set -e
+
+# ============================================
+# Baseline Local Test - MLSP
+# ============================================
 
 echo "Starting MLSP baseline test..."
-PORT=40000
 
-# Start server in new terminal
-gnome-terminal --title="MLSP SERVER" -- bash -c "python3 server.py; exec bash"
+# Check for Python
+if ! command -v python3 &> /dev/null; then
+    echo "Python not found in PATH."
+    exit 1
+fi
 
-# Wait for server startup
+PYTHON_EXE="python3"
+
+# Get script directory
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_DIR"
+
+# Start server
+echo "Starting server..."
+gnome-terminal -- bash -c "$PYTHON_EXE ../src/server.py; exec bash" &
 sleep 2
 
-# Launch four clients
-gnome-terminal --title="CLIENT 1" -- bash -c "python3 client.py; exec bash"
-sleep 1
-gnome-terminal --title="CLIENT 2" -- bash -c "python3 client.py; exec bash"
-sleep 1
-gnome-terminal --title="CLIENT 3" -- bash -c "python3 client.py; exec bash"
-sleep 1
-gnome-terminal --title="CLIENT 4" -- bash -c "python3 client.py; exec bash"
+# Start two clients
+for i in 1 2; do
+    echo "Starting client $i..."
+    gnome-terminal -- bash -c "$PYTHON_EXE ../src/client.py; exec bash" &
+    sleep 1
+done
 
-echo "All clients launched."
-echo "Close terminals manually when done."
+exit 0

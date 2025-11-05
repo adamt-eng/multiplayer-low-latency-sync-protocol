@@ -1,27 +1,30 @@
 @echo off
+setlocal
+
 REM ============================================
-REM Baseline Local Test - MLSP (Phase 1)
-REM Launches one server and four clients
+REM Baseline Local Test - MLSP
 REM ============================================
 
 echo Starting MLSP baseline test...
-set PORT=40000
+for /f "delims=" %%p in ('where python 2^>nul') do set PYTHON_EXE="%%p"
+if not defined PYTHON_EXE (
+    echo Python not found in PATH.
+    pause
+    exit /b 1
+)
 
-REM Start server in a new terminal
-start "MLSP SERVER" cmd /k python server.py
+REM Get script directory so paths stay correct
+set "PROJECT_DIR=%~dp0"
+cd /d "%PROJECT_DIR%"
 
-REM Give the server time to start
+REM Start server
+start "MLSP SERVER" cmd /k %PYTHON_EXE% ..\src\server.py
 timeout /t 2 >nul
 
-REM Start four clients in new terminals
-start "CLIENT 1" cmd /k python client.py
-timeout /t 1 >nul
-start "CLIENT 2" cmd /k python client.py
-timeout /t 1 >nul
-start "CLIENT 3" cmd /k python client.py
-timeout /t 1 >nul
-start "CLIENT 4" cmd /k python client.py
+REM Start four clients
+for /l %%i in (1,1,2) do (
+    start "CLIENT %%i" cmd /k %PYTHON_EXE% ..\src\client.py
+    timeout /t 1 >nul
+)
 
-echo All clients launched.
-echo When finished, close all terminals manually.
-pause
+exit /b 0
