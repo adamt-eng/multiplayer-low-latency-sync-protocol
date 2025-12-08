@@ -4,43 +4,116 @@ import struct
 import threading
 import time
 from typing import Dict, Set, Tuple
+import zlib
 import orjson
+import constants
 
-# --- Protocol constants ---
-PROTOCOL_ID = b"MLSP"
-VERSION = 1
-MSG_INIT = 4
-MSG_DATA = 1
-HEADER_FMT = "!4sBBIIQHI"
-HEADER_SIZE = struct.calcsize(HEADER_FMT)
-GRID_SIZE = 5
+PROTOCOL_ID = constants.PROTOCOL_ID
+VERSION = constants.VERSION
+MSG_INIT = constants.MSG_INIT
+MSG_DATA = constants.MSG_DATA
+MSG_EVENT = constants.MSG_EVENT
+HEADER_FMT = constants.HEADER_FMT
+HEADER_SIZE = constants.HEADER_SIZE
+GRID_SIZE = constants.GRID_SIZE
 
-# --- Shared state ---
-STATES = {"UNCLAIMED": 0, "ACQUIRED": 1}
 grid = {(r, c): {"state": "UNCLAIMED", "owner": None, "timestamp": 0}
         for r in range(GRID_SIZE) for c in range(GRID_SIZE)}
 
 clients: Set[Tuple[str, int]] = set()
-state: Dict[str, Dict[str, float]] = {}
 seq_num = 0
 snapshot_id = 0
 next_id = 1
 lock = threading.Lock()
-
-last_snapshot: Dict[Tuple[int, int], Dict] = {}
 is_game_over = False
 
+last_grid = grid.copy()
+client_last_acked: Dict[Tuple[str, int], int] = {}
 
-# --- Utility ---
+
+def print_header(packet: bytes) -> None:
+    if len(packet) < HEADER_SIZE:
+        print("Packet too small to contain header.")
+        return
+
+    (
+        protocol_id,
+        version,
+        msg_type,
+        snapshot_id,
+        seq,
+        server_timestamp,
+        payload_len,
+        checksum,
+    ) = struct.unpack(HEADER_FMT, packet[:HEADER_SIZE])
+
+    print("=== MLSP Header ===")
+    print(f"Protocol ID     : {protocol_id.decode(errors='ignore')}")
+    print(f"Version         : {version}")
+    print(f"Message Type    : {msg_type} (1=SNAPSHOT,2=EVENT,3=INIT)")
+    print(f"Snapshot ID     : {snapshot_id}")
+    print(f"Sequence Number : {seq}")
+    print(f"Server Timestamp: {server_timestamp} ms")
+    print(f"Payload Length  : {payload_len} bytes")
+    print(f"Checksum (CRC32): 0x{checksum:08X}")
+    print("===================")
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-# --- Core handlers ---
-def handle_acquire_request(sock: socket.socket, msg: dict, addr: Tuple[str, int]) -> None:
-    """Resolve ACQUIRE_REQUEST conflicts and update grid state."""
-    global grid, is_game_over
+def build_packet(msg_type: int, snap_id: int, seq: int, payload: bytes) -> bytes:
+    temp_header = struct.pack(
+        HEADER_FMT,
+        PROTOCOL_ID,
+        VERSION,
+        msg_type,
+        snap_id,
+        seq,
+        now_ms(),
+        len(payload),
+        0,
+    )
+    crc = zlib.crc32(temp_header + payload) & 0xFFFFFFFF
+    header = struct.pack(
+        HEADER_FMT,
+        PROTOCOL_ID,
+        VERSION,
+        msg_type,
+        snap_id,
+        seq,
+        now_ms(),
+        len(payload),
+        crc,
+    )
+    return header + payload
 
+
+def send_assign_id(sock: socket.socket, addr: Tuple[str, int], pid: str) -> None:
+    payload = orjson.dumps({"type": "ASSIGN_ID", "id": pid})
+    packet = build_packet(MSG_EVENT, 0, 0, payload)
+    print_header(packet)
+    sock.sendto(packet, addr)
+
+
+def send_game_over(sock: socket.socket, winner: str, scoreboard: Dict[str, int]) -> None:
+    global seq_num, snapshot_id
+    payload = orjson.dumps(
+        {
+            "type": "GAME_OVER",
+            "winner": winner,
+            "scoreboard": scoreboard,
+        }
+    )
+    packet = build_packet(MSG_EVENT, snapshot_id, seq_num, payload)
+    print_header(packet)
+    for cli in clients:
+        sock.sendto(packet, cli)
+
+
+def handle_acquire_request(sock: socket.socket, msg: dict, addr: Tuple[str, int]) -> None:
+    global grid, is_game_over
     cell = tuple(msg.get("cell", []))
     pid = msg.get("id")
     ts = msg.get("timestamp", 0)
@@ -48,59 +121,27 @@ def handle_acquire_request(sock: socket.socket, msg: dict, addr: Tuple[str, int]
     if cell not in grid:
         return
 
-    cell_state = grid[cell]
-
-    # Only unclaimed or older timestamp can claim
-    if cell_state["state"] == "UNCLAIMED" or ts < cell_state["timestamp"]:
+    old = grid[cell]
+    if old["state"] == "UNCLAIMED" or ts < old["timestamp"]:
         grid[cell] = {"state": "ACQUIRED", "owner": pid, "timestamp": ts}
         print(f"[ACQUIRE] {pid} claimed cell {cell}")
     else:
         return
 
-    # Check for game over
     if all(c["state"] == "ACQUIRED" for c in grid.values()):
-        winner_counts: Dict[str, int] = {}
+        counts: Dict[str, int] = {}
         for c in grid.values():
             owner = c["owner"]
-            winner_counts[owner] = winner_counts.get(owner, 0) + 1
-
-        if winner_counts:
-            winner = max(winner_counts, key=lambda k: winner_counts[k])
-
-            # --- Send final snapshot including the last claimed cell ---
-            final_snapshot = {
-                "type": "SNAPSHOT",
-                "snapshot_id": snapshot_id,
-                "timestamp": now_ms(),
-                "grid": {f"{r},{c}": cell for (r, c), cell in grid.items()},
-            }
-            final_payload = orjson.dumps(final_snapshot)
-            for cli in clients:
-                try:
-                    sock.sendto(final_payload, cli)
-                except Exception:
-                    pass
-
-            # --- Send GAME_OVER message ---
-            game_over_msg = {
-                "type": "GAME_OVER",
-                "winner": winner,
-                "scoreboard": winner_counts,
-            }
-            packet = orjson.dumps(game_over_msg)
-            for cli in clients:
-                try:
-                    sock.sendto(packet, cli)
-                except Exception:
-                    pass
-
-            is_game_over = True
-            print(f"[GAME_OVER] Winner: {winner}")
+            counts[owner] = counts.get(owner, 0) + 1
+        winner = max(counts, key=counts.get)  # type: ignore[arg-type]
+        is_game_over = True
+        send_delta_snapshot(sock)
+        send_game_over(sock, winner, counts)
+        print(f"[GAME_OVER] Winner: {winner}")
 
 
 def receiver(sock: socket.socket) -> None:
-    """Handle INIT, DATA, and ACQUIRE_REQUEST messages from clients."""
-    global next_id, state
+    global next_id, client_last_acked
     while True:
         try:
             data, addr = sock.recvfrom(2048)
@@ -108,70 +149,76 @@ def receiver(sock: socket.socket) -> None:
         except Exception:
             continue
 
-        msg_type = msg.get("type")
-
-        if msg_type == "INIT":
+        m = msg.get("type")
+        if m == "INIT":
             with lock:
-                if len(clients) >= 4:
-                    reject = orjson.dumps({"type": "ERROR", "reason": "Server full (max 4 players)"})
-                    sock.sendto(reject, addr)
-                    continue
                 pid = str(next_id)
                 next_id += 1
                 clients.add(addr)
+                client_last_acked.setdefault(addr, -1)
             print(f"[INIT] Assigned ID {pid} to {addr}")
-            assign = orjson.dumps({"type": "ASSIGN_ID", "id": pid})
-            sock.sendto(assign, addr)
+            send_assign_id(sock, addr, pid)
 
-        elif msg_type == "DATA":
-            with lock:
-                state[msg["id"]] = msg["pos"]
-
-        elif msg_type == "ACQUIRE_REQUEST":
+        elif m == "ACQUIRE_REQUEST":
             with lock:
                 handle_acquire_request(sock, msg, addr)
 
+        elif m == "SNAPSHOT_ACK":
+            ack_id = int(msg.get("snapshot_id", -1))
+            with lock:
+                prev = client_last_acked.get(addr, -1)
+                if ack_id > prev:
+                    client_last_acked[addr] = ack_id
+                    # For future: we could trim history based on min(client_last_acked.values())
 
-def broadcaster(sock: socket.socket):
-    global seq_num, snapshot_id, last_snapshot
-    period = 0.05  # 50 ms = 20 Hz
 
+def compute_delta() -> Dict[str, Dict]:
+    global last_grid
+    changed: Dict[str, Dict] = {}
+    for (r, c), cell in grid.items():
+        prev = last_grid.get((r, c))
+        if prev != cell:
+            changed[f"{r},{c}"] = cell
+    return changed
+
+
+def send_delta_snapshot(sock: socket.socket) -> None:
+    global seq_num, snapshot_id, last_grid
+    delta = compute_delta()
+    payload = orjson.dumps(
+        {
+            "type": "SNAPSHOT",
+            "snapshot_id": snapshot_id,
+            "timestamp": now_ms(),
+            "grid": delta,
+        }
+    )
+    packet = build_packet(MSG_DATA, snapshot_id, seq_num, payload)
+    print_header(packet)
+    for cli in clients:
+        sock.sendto(packet, cli)
+    if delta:
+        last_grid = grid.copy()
+    snapshot_id += 1
+    seq_num += 1
+
+
+def broadcaster(sock: socket.socket) -> None:
+    period = 0.05
     while True:
         if is_game_over:
             print("[BROADCASTER] Game over, stopping snapshots.")
             break
         start = time.time()
         with lock:
-            if not clients:
-                time.sleep(period)
-                continue
-
-            full_snapshot = {f"{r},{c}": cell for (r, c), cell in grid.items()}
-            payload = orjson.dumps({
-                "type": "SNAPSHOT",
-                "snapshot_id": snapshot_id,
-                "timestamp": now_ms(),
-                "grid": full_snapshot
-            })
-
-            for cli in clients:
-                try:
-                    sock.sendto(payload, cli)
-                except Exception:
-                    pass
-
-            seq_num += 1
-            snapshot_id += 1
-            last_snapshot = grid.copy()
-
+            send_delta_snapshot(sock)
         elapsed = time.time() - start
         if elapsed < period:
             time.sleep(period - elapsed)
 
 
-# --- Main ---
 def main() -> None:
-    addr: Tuple[str, int] = ("0.0.0.0", 40000)
+    addr = ("0.0.0.0", 40000)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(addr)
     print(f"Server ready on UDP {addr}")
@@ -183,7 +230,7 @@ def main() -> None:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("Server interrupted, shutting down.")
+        print("Server interrupted.")
     finally:
         sock.close()
 
