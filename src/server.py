@@ -1,18 +1,23 @@
-import json
 import socket
-import struct
 import threading
 import time
 from typing import Dict, Set, Tuple
-import zlib
 import orjson
 import constants
+from helpers import now_ms
+from packet_helper import build_packet, parse_packet, print_packet
 
+# Constants
 PROTOCOL_ID = constants.PROTOCOL_ID
 VERSION = constants.VERSION
+
 MSG_INIT = constants.MSG_INIT
-MSG_DATA = constants.MSG_DATA
-MSG_EVENT = constants.MSG_EVENT
+MSG_ASSIGN_ID = constants.MSG_ASSIGN_ID
+MSG_SNAPSHOT = constants.MSG_SNAPSHOT
+MSG_ACQUIRE_REQ = constants.MSG_ACQUIRE_REQ
+MSG_SNAPSHOT_ACK = constants.MSG_SNAPSHOT_ACK
+MSG_GAME_OVER = constants.MSG_GAME_OVER
+
 HEADER_FMT = constants.HEADER_FMT
 HEADER_SIZE = constants.HEADER_SIZE
 GRID_SIZE = constants.GRID_SIZE
@@ -30,86 +35,41 @@ is_game_over = False
 last_grid = grid.copy()
 client_last_acked: Dict[Tuple[str, int], int] = {}
 
+# Request/Response Functions
+def send_packet(sock, cli, msg_type, snap_id, payload):
+    global seq_num
 
-def print_header(packet: bytes) -> None:
-    if len(packet) < HEADER_SIZE:
-        print("Packet too small to contain header.")
-        return
-
-    (
-        protocol_id,
-        version,
-        msg_type,
-        snapshot_id,
-        seq,
-        server_timestamp,
-        payload_len,
-        checksum,
-    ) = struct.unpack(HEADER_FMT, packet[:HEADER_SIZE])
-
-    print("=== MLSP Header ===")
-    print(f"Protocol ID     : {protocol_id.decode(errors='ignore')}")
-    print(f"Version         : {version}")
-    print(f"Message Type    : {msg_type} (1=SNAPSHOT,2=EVENT,3=INIT)")
-    print(f"Snapshot ID     : {snapshot_id}")
-    print(f"Sequence Number : {seq}")
-    print(f"Server Timestamp: {server_timestamp} ms")
-    print(f"Payload Length  : {payload_len} bytes")
-    print(f"Checksum (CRC32): 0x{checksum:08X}")
-    print("===================")
-
-
-def now_ms() -> int:
-    return int(time.time() * 1000)
-
-
-def build_packet(msg_type: int, snap_id: int, seq: int, payload: bytes) -> bytes:
-    temp_header = struct.pack(
-        HEADER_FMT,
-        PROTOCOL_ID,
-        VERSION,
-        msg_type,
-        snap_id,
-        seq,
-        now_ms(),
-        len(payload),
-        0,
-    )
-    crc = zlib.crc32(temp_header + payload) & 0xFFFFFFFF
-    header = struct.pack(
-        HEADER_FMT,
-        PROTOCOL_ID,
-        VERSION,
-        msg_type,
-        snap_id,
-        seq,
-        now_ms(),
-        len(payload),
-        crc,
-    )
-    return header + payload
-
+    packet = build_packet(msg_type, snap_id, seq_num, payload)
+    print_packet(packet)
+    seq_num += 1
+    sock.sendto(packet, cli)
 
 def send_assign_id(sock: socket.socket, addr: Tuple[str, int], pid: str) -> None:
-    payload = orjson.dumps({"type": "ASSIGN_ID", "id": pid})
-    packet = build_packet(MSG_EVENT, 0, 0, payload)
-    print_header(packet)
-    sock.sendto(packet, addr)
+    payload = orjson.dumps({"id": pid})
+    send_packet(sock, addr, MSG_ASSIGN_ID, 0, payload)
+
+
+def send_delta_snapshot(sock):
+    global snapshot_id, last_grid
+
+    delta = compute_delta()
+    payload = orjson.dumps({"grid": delta, "timestamp": now_ms()})
+
+    for cli in clients:
+        send_packet(sock, cli, MSG_SNAPSHOT, snapshot_id, payload)
+
+    if delta:
+        last_grid = grid.copy()
+
+    snapshot_id += 1
 
 
 def send_game_over(sock: socket.socket, winner: str, scoreboard: Dict[str, int]) -> None:
     global seq_num, snapshot_id
-    payload = orjson.dumps(
-        {
-            "type": "GAME_OVER",
-            "winner": winner,
-            "scoreboard": scoreboard,
-        }
-    )
-    packet = build_packet(MSG_EVENT, snapshot_id, seq_num, payload)
-    print_header(packet)
+    payload = orjson.dumps({"winner": winner, "scoreboard": scoreboard})
+
     for cli in clients:
-        sock.sendto(packet, cli)
+        send_packet(sock, cli, MSG_GAME_OVER, snapshot_id, payload)
 
 
 def handle_acquire_request(sock: socket.socket, msg: dict, addr: Tuple[str, int]) -> None:
@@ -121,6 +81,7 @@ def handle_acquire_request(sock: socket.socket, msg: dict, addr: Tuple[str, int]
     if cell not in grid:
         return
 
+    # Conflict handling
     old = grid[cell]
     if old["state"] == "UNCLAIMED" or ts < old["timestamp"]:
         grid[cell] = {"state": "ACQUIRED", "owner": pid, "timestamp": ts}
@@ -128,6 +89,7 @@ def handle_acquire_request(sock: socket.socket, msg: dict, addr: Tuple[str, int]
     else:
         return
 
+    # Handle game over
     if all(c["state"] == "ACQUIRED" for c in grid.values()):
         counts: Dict[str, int] = {}
         for c in grid.values():
@@ -140,37 +102,7 @@ def handle_acquire_request(sock: socket.socket, msg: dict, addr: Tuple[str, int]
         print(f"[GAME_OVER] Winner: {winner}")
 
 
-def receiver(sock: socket.socket) -> None:
-    global next_id, client_last_acked
-    while True:
-        try:
-            data, addr = sock.recvfrom(2048)
-            msg = json.loads(data.decode("utf-8"))
-        except Exception:
-            continue
-
-        m = msg.get("type")
-        if m == "INIT":
-            with lock:
-                pid = str(next_id)
-                next_id += 1
-                clients.add(addr)
-                client_last_acked.setdefault(addr, -1)
-            print(f"[INIT] Assigned ID {pid} to {addr}")
-            send_assign_id(sock, addr, pid)
-
-        elif m == "ACQUIRE_REQUEST":
-            with lock:
-                handle_acquire_request(sock, msg, addr)
-
-        elif m == "SNAPSHOT_ACK":
-            ack_id = int(msg.get("snapshot_id", -1))
-            with lock:
-                prev = client_last_acked.get(addr, -1)
-                if ack_id > prev:
-                    client_last_acked[addr] = ack_id
-                    # For future: we could trim history based on min(client_last_acked.values())
-
+# Reliability enhancement strategy: Delta encoding; only send changed cells since last snapshot
 
 def compute_delta() -> Dict[str, Dict]:
     global last_grid
@@ -181,30 +113,8 @@ def compute_delta() -> Dict[str, Dict]:
             changed[f"{r},{c}"] = cell
     return changed
 
-
-def send_delta_snapshot(sock: socket.socket) -> None:
-    global seq_num, snapshot_id, last_grid
-    delta = compute_delta()
-    payload = orjson.dumps(
-        {
-            "type": "SNAPSHOT",
-            "snapshot_id": snapshot_id,
-            "timestamp": now_ms(),
-            "grid": delta,
-        }
-    )
-    packet = build_packet(MSG_DATA, snapshot_id, seq_num, payload)
-    print_header(packet)
-    for cli in clients:
-        sock.sendto(packet, cli)
-    if delta:
-        last_grid = grid.copy()
-    snapshot_id += 1
-    seq_num += 1
-
-
+# Broadcaster and Receiver Threads
 def broadcaster(sock: socket.socket) -> None:
-    period = 0.05
     while True:
         if is_game_over:
             print("[BROADCASTER] Game over, stopping snapshots.")
@@ -213,15 +123,49 @@ def broadcaster(sock: socket.socket) -> None:
         with lock:
             send_delta_snapshot(sock)
         elapsed = time.time() - start
-        if elapsed < period:
-            time.sleep(period - elapsed)
+        if elapsed < constants.BROADCAST_FREQUENCY:
+            time.sleep(constants.BROADCAST_FREQUENCY - elapsed)
+
+
+def receiver(sock: socket.socket) -> None:
+    global next_id, client_last_acked
+
+    while True:
+        try:
+            packet, addr = sock.recvfrom(4096)
+        except:
+            continue
+
+        (msg_type, snapshot_id, _, _, data) = parse_packet(packet)
+
+        if data is None:
+            continue
+
+        if msg_type == MSG_INIT:
+            with lock:
+                pid = str(next_id)
+                next_id += 1
+                clients.add(addr)
+                client_last_acked.setdefault(addr, -1)
+            send_assign_id(sock, addr, pid)
+
+        elif msg_type == MSG_ACQUIRE_REQ:
+            with lock:
+                handle_acquire_request(sock, data, addr)
+
+        elif msg_type == MSG_SNAPSHOT_ACK:
+            ack = snapshot_id
+            with lock:
+                if ack > client_last_acked.get(addr, -1): # type: ignore
+                    client_last_acked[addr] = ack # type: ignore
 
 
 def main() -> None:
     addr = ("0.0.0.0", 40000)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(addr)
-    print(f"Server ready on UDP {addr}")
+
+    print(f"Server ready at UDP {addr}")
 
     threading.Thread(target=receiver, args=(sock,), daemon=True).start()
     threading.Thread(target=broadcaster, args=(sock,), daemon=True).start()
