@@ -16,6 +16,7 @@ MSG_ASSIGN_ID = constants.MSG_ASSIGN_ID
 MSG_SNAPSHOT = constants.MSG_SNAPSHOT
 MSG_ACQUIRE_REQ = constants.MSG_ACQUIRE_REQ
 MSG_SNAPSHOT_ACK = constants.MSG_SNAPSHOT_ACK
+MSG_SNAPSHOT_NACK = constants.MSG_SNAPSHOT_NACK
 MSG_GAME_OVER = constants.MSG_GAME_OVER
 
 HEADER_FMT = constants.HEADER_FMT
@@ -40,7 +41,9 @@ def send_packet(sock, cli, msg_type, snap_id, payload):
     global seq_num
 
     packet = build_packet(msg_type, snap_id, seq_num, payload)
-    print_packet(packet)
+
+    if msg_type != MSG_SNAPSHOT: print_packet(packet)
+
     seq_num += 1
     sock.sendto(packet, cli)
 
@@ -50,13 +53,17 @@ def send_assign_id(sock: socket.socket, addr: Tuple[str, int], pid: str) -> None
 
 
 def send_delta_snapshot(sock):
-    global snapshot_id, last_grid
+    global snapshot_id, last_grid, required_snapshot
 
     delta = compute_delta()
     payload = orjson.dumps({"grid": delta, "timestamp": now_ms()})
 
     for cli in clients:
         send_packet(sock, cli, MSG_SNAPSHOT, snapshot_id, payload)
+
+    required_snapshot = snapshot_id
+    for cli in clients:
+        client_last_acked.setdefault(cli, -1)
 
     if delta:
         last_grid = grid.copy()
@@ -158,6 +165,15 @@ def receiver(sock: socket.socket) -> None:
             with lock:
                 if ack > client_last_acked.get(addr, -1): # type: ignore
                     client_last_acked[addr] = ack # type: ignore
+                    
+        elif msg_type == constants.MSG_SNAPSHOT_NACK:
+            nack = data.get("last_snapshot", -1)
+            with lock:
+                # Client indicates missing snapshot(s)
+                # Server simply re-sends the latest delta snapshot
+                print(f"[NACK] {addr} reports missing snapshot after {nack}")
+                send_delta_snapshot(sock)
+
 
 
 def main() -> None:
