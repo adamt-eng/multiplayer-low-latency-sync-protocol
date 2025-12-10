@@ -52,11 +52,20 @@ def send_assign_id(sock: socket.socket, addr: Tuple[str, int], pid: str) -> None
     send_packet(sock, addr, MSG_ASSIGN_ID, 0, payload)
 
 
+def send_full_snapshot(sock, addr):
+    """Send the complete grid state to a newly joined player."""
+    global snapshot_id
+    # Convert tuple keys to strings for JSON serialization
+    grid_serializable = {f"{r},{c}": cell for (r, c), cell in grid.items()}
+    payload = orjson.dumps({"grid": grid_serializable, "timestamp": now_ms(), "is_full": True})
+    send_packet(sock, addr, MSG_SNAPSHOT, snapshot_id, payload)
+
+
 def send_delta_snapshot(sock):
     global snapshot_id, last_grid, required_snapshot
 
     delta = compute_delta()
-    payload = orjson.dumps({"grid": delta, "timestamp": now_ms()})
+    payload = orjson.dumps({"grid": delta, "timestamp": now_ms(), "is_full": False})
 
     for cli in clients:
         send_packet(sock, cli, MSG_SNAPSHOT, snapshot_id, payload)
@@ -155,6 +164,8 @@ def receiver(sock: socket.socket) -> None:
                 clients.add(addr)
                 client_last_acked.setdefault(addr, -1)
             send_assign_id(sock, addr, pid)
+            # Send full grid state to newly joined player so they see all previous moves
+            send_full_snapshot(sock, addr)
 
         elif msg_type == MSG_ACQUIRE_REQ:
             with lock:
