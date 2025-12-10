@@ -59,9 +59,22 @@ def send_acquire_request(sock, pid, cell):
     sock.sendto(packet, SERVER)
 
 def apply_delta(delta: dict):
+    """Apply delta changes to the grid."""
     for key, val in delta.items():
         r, c = map(int, key.split(","))
         grid[(r, c)] = val
+
+
+def apply_full_snapshot(full_grid: dict):
+    """Replace entire grid with full snapshot (for late joiners)."""
+    global grid
+    grid.clear()
+    for key, val in full_grid.items():
+        if isinstance(key, str):
+            r, c = map(int, key.split(","))
+            grid[(r, c)] = val
+        else:
+            grid[key] = val
 
 def send_snapshot_nack(sock, snapshot_id):
     payload = json.dumps({"last_snapshot": snapshot_id}).encode()
@@ -93,10 +106,22 @@ def snapshot_applier():
             return
 
         if snapshot_buffer:
-            snap_id, recv_time, delta = snapshot_buffer[0]
+            snap_id, recv_time, snapshot_data = snapshot_buffer[0]
             if now_ms() - recv_time >= RENDER_DELAY_MS:
                 snapshot_buffer.popleft()
-                apply_delta(delta)
+                
+                # Check if this is a full snapshot (for late joiners) or delta
+                # snapshot_data is the entire parsed JSON, which contains {"grid": {...}, "timestamp": ..., "is_full": ...}
+                is_full = snapshot_data.get("is_full", False)
+                grid_data = snapshot_data.get("grid", {})
+                
+                if is_full:
+                    # This is a full grid snapshot
+                    apply_full_snapshot(grid_data)
+                else:
+                    # This is a delta snapshot
+                    apply_delta(grid_data)
+                
                 client_gui.update_grid()
                 continue
 
@@ -131,7 +156,8 @@ def receiver(sock: socket.socket):
             latest_snapshot = snapshot_id
             last_snapshot_time = now_ms()
 
-            snapshot_buffer.append((snapshot_id, now_ms(), data["grid"]))
+            # Store the entire snapshot data (could be full grid or delta)
+            snapshot_buffer.append((snapshot_id, now_ms(), data))
             send_snapshot_ack(sock, snapshot_id)
             continue
 
