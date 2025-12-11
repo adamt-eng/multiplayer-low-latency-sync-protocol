@@ -1,4 +1,4 @@
-IF=eth0
+IF=lo
 
 # Commands to start server/clients
 START_SERVER="python3 ../src/server.py"
@@ -42,8 +42,7 @@ run_test() {
 
     sleep $DURATION
 
-    kill $SERVER_PID 2>/dev/null
-    kill $C1 $C2 $C3 $C4 2>/dev/null
+    pkill -f python
 
     sudo tc qdisc del dev $IF root 2>/dev/null
 
@@ -63,6 +62,6 @@ run_test "Loss 5%" "loss 5%"
 
 run_test "Delay 100ms" "delay 100ms"
 
-run_test "Delay 100ms ± 10ms Jitter" "delay 100ms 10ms"
+run_test "Delay 100ms ± 10ms Jitter" "delay 1000ms 10ms"
 
 echo "ALL TESTS COMPLETE."
