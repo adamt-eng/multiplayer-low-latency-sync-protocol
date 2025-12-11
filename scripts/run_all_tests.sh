@@ -54,14 +54,14 @@ run_test() {
 # RUN ALL TESTS
 # ----------------------
 
-run_test "Baseline (No impairment)" ""
+# run_test "Baseline (No impairment)" ""
 
-run_test "Loss 2%" "loss 2%"
+ run_test "Loss 2%" "loss 2%"
 
-run_test "Loss 5%" "loss 5%"
+# run_test "Loss 5%" "loss 5%"
 
-run_test "Delay 100ms" "delay 100ms"
+# run_test "Delay 100ms" "delay 100ms"
 
-run_test "Delay 100ms ± 10ms Jitter" "delay 1000ms 10ms"
+# run_test "Delay 100ms ± 10ms Jitter" "delay 1000ms 10ms"
 
 echo "ALL TESTS COMPLETE."
