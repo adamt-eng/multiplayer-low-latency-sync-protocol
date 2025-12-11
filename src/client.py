@@ -27,27 +27,25 @@ import time
 snapshot_buffer = deque()
 RENDER_DELAY_MS = 60
 
-# Logging setup
-LOG_FIELDS = ["client_id", "snapshot_id", "seq_num", "server_timestamp_ms", "recv_time_ms", "latency_ms", "jitter_ms", "perceived_state"]
-log_lock = threading.Lock()
-prev_server_timestamp = None
-prev_recv_time = None
-
 player_id = [None] 
 
 game_over = False
 Deployment = False
 SERVER = None
 
-# This dictionary is shared with client_gui. It must not be re-assigned (e.g. grid = {}).
 grid = {(r, c): {"state": "UNCLAIMED", "owner": None}
         for r in range(GRID_SIZE) for c in range(GRID_SIZE)}
 
 latest_snapshot = -1
 last_snapshot_time = 0
 
-# For handling chunked snapshots
 chunked_snapshots = {}
+
+# Logging setup
+LOG_FIELDS = ["client_id", "snapshot_id", "seq_num", "server_timestamp_ms", "recv_time_ms", "latency_ms", "jitter_ms", "perceived_state"]
+log_lock = threading.Lock()
+prev_server_timestamp = None
+prev_recv_time = None
 
 def init_client_log():
     """Initialize the client log file with headers."""
@@ -126,13 +124,6 @@ def send_acquire_request(sock, pid, cell):
     #print_packet(packet)
     sock.sendto(packet, SERVER)
 
-def apply_delta(delta: dict):
-    """Apply delta changes to the grid."""
-    for key, val in delta.items():
-        r, c = map(int, key.split(","))
-        grid[(r, c)] = val
-
-
 def apply_full_snapshot(full_grid: dict):
     """Replace entire grid with full snapshot (for late joiners)."""
     global grid
@@ -155,7 +146,8 @@ def send_snapshot_nack(sock, snapshot_id):
     packet = build_packet(MSG_SNAPSHOT_NACK, snapshot_id, 0, payload)
     print_packet(packet)
     sock.sendto(packet, SERVER)
-    
+
+# Background threads
 def snapshot_watchdog(sock):
     global last_snapshot_time, latest_snapshot, game_over
 
@@ -183,14 +175,13 @@ def snapshot_watchdog(sock):
 
         time.sleep(timeout)
 
-
 def snapshot_applier():
     while True:
         if game_over and not snapshot_buffer:
             return
 
         if snapshot_buffer:
-            snap_id, recv_time, snapshot_data = snapshot_buffer[0]
+            _, recv_time, snapshot_data = snapshot_buffer[0]
             if now_ms() - recv_time >= RENDER_DELAY_MS:
                 snapshot_buffer.popleft()
                 
@@ -200,8 +191,10 @@ def snapshot_applier():
                 if is_full:
                     apply_full_snapshot(grid_data)
                 else:
-                    apply_delta(grid_data)
-                
+                    for key, val in grid_data.items():
+                        r, c = map(int, key.split(","))
+                        grid[(r, c)] = val
+                        
                 client_gui.update_grid()
                 continue
 
@@ -316,8 +309,7 @@ def random_clicker(sock):
         r = random.randint(0, GRID_SIZE - 1)
         c = random.randint(0, GRID_SIZE - 1)
         send_acquire_request(sock, player_id[0], (r, c))
-        time.sleep(random.uniform(0.2, 0.6))
-
+        time.sleep(random.uniform(0.5, 0.8))
 
 def main():
     global player_id, sock, SERVER
