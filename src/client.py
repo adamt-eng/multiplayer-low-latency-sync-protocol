@@ -2,7 +2,20 @@ import json
 import socket
 import threading
 import time
-import constants
+from constants import (
+    MSG_INIT,
+    MSG_ASSIGN_ID,
+    MSG_SNAPSHOT,
+    MSG_ACQUIRE_REQ,
+    MSG_SNAPSHOT_ACK,
+    MSG_SNAPSHOT_NACK,
+    MSG_GAME_OVER,
+    MSG_ACQUIRE_EVENT,
+    MSG_ASSIGN_ID_ACK,
+    MSG_ACQUIRE_ACK,
+    GRID_SIZE,
+    BROADCAST_FREQUENCY
+)
 import csv
 import os
 from helpers import get_local_ipv4, now_ms
@@ -18,23 +31,6 @@ LOG_FIELDS = ["client_id", "snapshot_id", "seq_num", "server_timestamp_ms", "rec
 log_lock = threading.Lock()
 prev_server_timestamp = None
 prev_recv_time = None
-
-# Constants
-PROTOCOL_ID = constants.PROTOCOL_ID
-VERSION = constants.VERSION
-
-MSG_INIT = constants.MSG_INIT
-MSG_ASSIGN_ID = constants.MSG_ASSIGN_ID
-MSG_SNAPSHOT = constants.MSG_SNAPSHOT
-MSG_ACQUIRE_REQ = constants.MSG_ACQUIRE_REQ
-MSG_SNAPSHOT_ACK = constants.MSG_SNAPSHOT_ACK
-MSG_SNAPSHOT_NACK = constants.MSG_SNAPSHOT_NACK
-MSG_GAME_OVER = constants.MSG_GAME_OVER
-
-HEADER_FMT = constants.HEADER_FMT
-HEADER_SIZE = constants.HEADER_SIZE
-GRID_SIZE = constants.GRID_SIZE
-CELL_SIZE = constants.CELL_SIZE
 
 player_id = [None] 
 
@@ -105,9 +101,13 @@ def log_client_metric(snap_id, seq_num, server_ts, recv_ts, log_file):
 # Request/Response Functions
 def send_init(sock):
     packet = build_packet(MSG_INIT, 0, 0, b"{}")
-    print_packet(packet)
+   # print_packet(packet)
     sock.sendto(packet, SERVER)
-
+    
+def send_assign_ack(sock):
+    pkt = build_packet(MSG_ASSIGN_ID_ACK, 0, 0, b"{}")
+    sock.sendto(pkt, SERVER)
+    
 def send_snapshot_ack(sock, snapshot_id):
     payload = json.dumps({"snapshot_id": snapshot_id}).encode()
     packet = build_packet(MSG_SNAPSHOT_ACK, snapshot_id, 0, payload)
@@ -116,7 +116,7 @@ def send_snapshot_ack(sock, snapshot_id):
 def send_acquire_request(sock, pid, cell):
     payload = json.dumps({"id": pid, "cell": cell, "timestamp": now_ms()}).encode()
     packet = build_packet(MSG_ACQUIRE_REQ, 0, 0, payload)
-    print_packet(packet)
+    #print_packet(packet)
     sock.sendto(packet, SERVER)
 
 def apply_delta(delta: dict):
@@ -130,10 +130,6 @@ def apply_full_snapshot(full_grid: dict):
     """Replace entire grid with full snapshot (for late joiners)."""
     global grid
     
-    # --- BUG FIX START ---
-    # Do NOT create a new dictionary (grid = {}). The GUI holds a reference to the old one.
-    # Instead, modify the existing dictionary in place.
-    
     # 1. Reset all cells to default state in the existing dict
     for r in range(GRID_SIZE):
         for c in range(GRID_SIZE):
@@ -146,18 +142,17 @@ def apply_full_snapshot(full_grid: dict):
             grid[(r, c)] = val
         else:
             grid[key] = val
-    # --- BUG FIX END ---
 
 def send_snapshot_nack(sock, snapshot_id):
     payload = json.dumps({"last_snapshot": snapshot_id}).encode()
-    packet = build_packet(constants.MSG_SNAPSHOT_NACK, snapshot_id, 0, payload)
+    packet = build_packet(MSG_SNAPSHOT_NACK, snapshot_id, 0, payload)
     print_packet(packet)
     sock.sendto(packet, SERVER)
     
 def snapshot_watchdog(sock):
     global last_snapshot_time, latest_snapshot, game_over
 
-    expected = constants.BROADCAST_FREQUENCY * 1000
+    expected = BROADCAST_FREQUENCY * 1000
     timeout = int(expected * 1.2)
 
     while True:
@@ -168,8 +163,7 @@ def snapshot_watchdog(sock):
         if last_snapshot_time != 0 and now - last_snapshot_time > timeout:
             send_snapshot_nack(sock, latest_snapshot)
             last_snapshot_time = now
-        time.sleep(constants.BROADCAST_FREQUENCY)
-
+        time.sleep(BROADCAST_FREQUENCY)
 
 def snapshot_applier():
     while True:
@@ -194,7 +188,6 @@ def snapshot_applier():
 
         time.sleep(0.01)
 
-
 def receiver(sock: socket.socket):
     global latest_snapshot, player_id, last_snapshot_time, game_over
     
@@ -213,10 +206,10 @@ def receiver(sock: socket.socket):
 
         if msg_type == MSG_ASSIGN_ID:
             player_id[0] = data["id"]
-            print(f"[ASSIGN_ID] Assigned Player ID: {player_id[0]}")
+            send_assign_ack(sock)
             client_gui.update_window_title(player_id[0])
-            log_file = init_client_log()
-            print(f"Client logging to {log_file}")
+            # log_file = init_client_log()
+            # print(f"Client logging to {log_file}")
             continue
 
         if msg_type == MSG_SNAPSHOT:
@@ -268,11 +261,29 @@ def receiver(sock: socket.socket):
                 
                 continue
 
-
         if msg_type == MSG_GAME_OVER:
-            print(f"[GAME_OVER] Winner: {data.get('winner')} | Scoreboard: {data.get('scoreboard')}")
+            print(f"[CLIENT ({player_id[0]}) - GAME_OVER] Winner: {data.get('winner')} | Scoreboard: {data.get('scoreboard')}")
             game_over = True
             continue
+        
+        if msg_type == MSG_ACQUIRE_EVENT:
+            cell = tuple(data["cell"])
+            owner = data["owner"]
+            event_id = data["event_id"]
+
+            grid[cell] = {"state": "ACQUIRED", "owner": owner}
+
+            client_gui.update_grid()
+
+            ack_payload = json.dumps({"event_id": event_id}).encode()
+            pkt = build_packet(MSG_ACQUIRE_ACK, 0, 0, ack_payload)
+            sock.sendto(pkt, SERVER)
+            continue
+
+def init_resender(sock):
+    while player_id[0] is None:
+        send_init(sock)
+        time.sleep(0.3)
 
 def main():
     global player_id, sock, SERVER
@@ -280,20 +291,19 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", 0))
 
-    # Pass the grid dictionary to the GUI. 
-    # Because we fixed apply_full_snapshot to update in-place, the GUI will see the changes.
     client_gui.init_gui(grid, sock, player_id, send_acquire_request)
     client_gui.setup_gui()
 
     threading.Thread(target=receiver, args=(sock,), daemon=True).start()
-    threading.Thread(target=snapshot_watchdog, args=(sock,), daemon=True).start()
+   # threading.Thread(target=snapshot_watchdog, args=(sock,), daemon=True).start()
     threading.Thread(target=snapshot_applier, daemon=True).start()
 
     if Deployment:
         SERVER = ("", 40000)
     else:
         SERVER = (get_local_ipv4(), 40000)
-
+    
+   # threading.Thread(target=init_resender, args=(sock,), daemon=True).start()
     send_init(sock)
 
     try:
