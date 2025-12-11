@@ -23,9 +23,14 @@ from constants import (
 )
 from helpers import now_ms
 from packet_helper import build_packet, parse_packet, print_packet
+import os
 
-# Logging setup
-LOG_FILE = "test_results/server_log.csv"
+test_name = os.environ.get("CURRENT_TEST_NAME", "default_test")
+folder = os.path.join("test_results", test_name)
+os.makedirs(folder, exist_ok=True)
+
+LOG_FILE = os.path.join(folder, "server_log.csv")
+
 # Added 'bytes_sent_instant' to track specific packet size
 LOG_FIELDS = ["timestamp_ms", "snapshot_id", "cpu_percent", "bytes_sent_instant", "authoritative_state"]
 log_lock = threading.Lock()
@@ -65,9 +70,9 @@ def log_server_metric(snap_id, bytes_sent_instant):
     
     threading.Thread(target=write_log, daemon=True).start()
 
-pending_assign = {}  # addr -> (player_id, last_sent_time)
-pending_acquire_events = {}  # event_id -> { client_addr: False/True }
-last_heard = {}  # addr -> timestamp of last packet
+pending_assign = {}
+pending_acquire_events = {} 
+last_heard = {}
 
 grid = {(r, c): {"state": "UNCLAIMED", "owner": None, "timestamp": 0}
         for r in range(GRID_SIZE) for c in range(GRID_SIZE)}
@@ -80,7 +85,7 @@ next_id = 1
 lock = threading.Lock()
 is_game_over = False
 last_grid = grid.copy()
-client_last_acked: Dict[Tuple[str, int], int] = {}
+client_last_acked = {}
 
 def send_packet(sock, cli, msg_type, snap_id, payload):
     global seq_num
@@ -122,9 +127,6 @@ def send_delta_snapshot(sock):
     for cli in clients:
         pkt_len = send_packet(sock, cli, MSG_SNAPSHOT, snapshot_id, payload)
         bytes_sent_this_tick += pkt_len
-
-    if delta:
-        last_grid = grid.copy()
 
     # Log metrics
     log_server_metric(snapshot_id, bytes_sent_this_tick)
@@ -188,6 +190,20 @@ def compute_delta() -> Dict[str, Dict]:
             changed[f"{r},{c}"] = cell
     return changed
 
+def update_last_grid_when_safe():
+    global last_grid
+    while True:
+        time.sleep(0.01)
+        if not clients:
+            continue
+
+        # smallest acked snapshot among all clients
+        min_acked = min(client_last_acked.get(cli, -1) for cli in clients)
+
+        # Advance last_grid only when all have seen up to snapshot_id
+        if min_acked >= snapshot_id - 1:
+            last_grid = grid.copy()
+
 def broadcaster(sock: socket.socket) -> None:
     while True:
         if is_game_over: break
@@ -242,6 +258,9 @@ def receiver(sock: socket.socket) -> None:
                 pending_acquire_events[eid]["acks"][addr] = True
                 if all(pending_acquire_events[eid]["acks"].values()):
                     del pending_acquire_events[eid]
+        elif msg_type == MSG_SNAPSHOT_ACK:
+            client_last_acked[addr] = data["snapshot_id"]
+
 
 def resend_acquire_events(sock):
     while True:
@@ -266,12 +285,13 @@ def main() -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(addr)
     print(f"Server ready at UDP {addr}")
-    init_server_log() # Reset log
+    init_server_log()
     
     threading.Thread(target=receiver, args=(sock,), daemon=True).start()
     threading.Thread(target=broadcaster, args=(sock,), daemon=True).start()
     threading.Thread(target=resend_acquire_events, args=(sock,), daemon=True).start()
     threading.Thread(target=resend_assign_id, args=(sock,), daemon=True).start()
+    threading.Thread(target=update_last_grid_when_safe, daemon=True).start()
 
     try:
         while True: time.sleep(1)
