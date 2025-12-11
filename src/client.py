@@ -57,7 +57,7 @@ def init_client_log():
     if player_id[0] is None:
         return
     
-    log_file = f"client_log_{player_id[0]}.csv"
+    log_file = f"test_results/client_log_{player_id[0]}.csv"
     if not os.path.exists(log_file):
         with open(log_file, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)

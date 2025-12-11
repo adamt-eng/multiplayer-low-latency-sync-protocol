@@ -5,8 +5,8 @@ import glob
 import os
 
 # --- Configuration ---
-SERVER_LOG = "server_log.csv"
-CLIENT_LOG_PATTERN = "client_log_*.csv"
+SERVER_LOG = "test_results/server_log.csv"
+CLIENT_LOG_PATTERN = "test_results/client_log_*.csv"
 OUTPUT_CSV = "experiment_results_final.csv"
 
 def calculate_state_error(server_json, client_json):

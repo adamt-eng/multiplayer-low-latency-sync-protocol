@@ -12,7 +12,7 @@ from helpers import now_ms
 from packet_helper import build_packet, parse_packet, print_packet
 
 # Logging setup
-LOG_FILE = "server_log.csv"
+LOG_FILE = "test_results/server_log.csv"
 # Added 'bytes_sent_instant' to track specific packet size
 LOG_FIELDS = ["timestamp_ms", "snapshot_id", "cpu_percent", "bytes_sent_instant", "authoritative_state"]
 log_lock = threading.Lock()
