@@ -8,7 +8,7 @@ START_CLIENT3="python3 ../src/client.py --id 3"
 START_CLIENT4="python3 ../src/client.py --id 4"
 
 # Duration per test
-DURATION=30
+DURATION=15
 
 run_test() {
     NAME=$1
@@ -25,6 +25,9 @@ run_test() {
     if [ ! -z "$NETEM_CMD" ]; then
         sudo tc qdisc add dev $IF root netem $NETEM_CMD
     fi
+
+    export ENABLE_RANDOM_CLICKS=1
+    export CURRENT_TEST_NAME="$NAME"
 
     # Start server
     bash -c "$START_SERVER" &
@@ -54,14 +57,10 @@ run_test() {
 # RUN ALL TESTS
 # ----------------------
 
-# run_test "Baseline (No impairment)" ""
-
- run_test "Loss 2%" "loss 2%"
-
-# run_test "Loss 5%" "loss 5%"
-
-# run_test "Delay 100ms" "delay 100ms"
-
-# run_test "Delay 100ms ± 10ms Jitter" "delay 1000ms 10ms"
+run_test "Baseline (No impairment)" ""
+run_test "Loss 2%" "loss 2%"
+run_test "Loss 5%" "loss 5%"
+run_test "Delay 100ms" "delay 100ms"
+run_test "Delay 100ms ± 10ms Jitter" "delay 1000ms 10ms"
 
 echo "ALL TESTS COMPLETE."
