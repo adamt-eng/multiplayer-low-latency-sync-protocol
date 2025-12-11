@@ -10,7 +10,7 @@ UDP-based multiplayer synchronization for real-time grid interaction and state r
 The system was designed for real-time interaction on an N×N grid, supporting up to **four concurrent players**.
 
 Players click cells to acquire them.
-The server validates ownership, updates the authoritative state, and broadcasts synchronized **SNAPSHOT** messages to all clients at 20 Hz.
+The server validates ownership, updates the authoritative state, and broadcasts synchronized **SNAPSHOT** messages to all clients at 50 Hz.
 
 When all cells are acquired, the server sends `GAME_OVER`, including the final scoreboard.
 
