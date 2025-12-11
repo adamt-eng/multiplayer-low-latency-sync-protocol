@@ -19,19 +19,21 @@ from constants import (
     MSG_ASSIGN_ID_ACK,
     MSG_ACQUIRE_ACK,
     GRID_SIZE,
-    BROADCAST_FREQUENCY
+    BROADCAST_FREQUENCY,
+    HEADER_SIZE,
+    MAX_PACKET_BYTES
 )
 from helpers import now_ms
 from packet_helper import build_packet, parse_packet, print_packet
 import os
 
+# Logging setup
 test_name = os.environ.get("CURRENT_TEST_NAME", "default_test")
 folder = os.path.join("test_results", test_name)
 os.makedirs(folder, exist_ok=True)
 
 LOG_FILE = os.path.join(folder, "server_log.csv")
 
-# Added 'bytes_sent_instant' to track specific packet size
 LOG_FIELDS = ["timestamp_ms", "snapshot_id", "cpu_percent", "bytes_sent_instant", "authoritative_state"]
 log_lock = threading.Lock()
 
@@ -58,7 +60,7 @@ def log_server_metric(snap_id, bytes_sent_instant):
         "timestamp_ms": now_ms(),
         "snapshot_id": snap_id,
         "cpu_percent": cpu_usage,
-        "bytes_sent_instant": bytes_sent_instant, # Size of THIS packet/snapshot
+        "bytes_sent_instant": bytes_sent_instant,
         "authoritative_state": json.dumps(auth_state)
     }
     
@@ -70,14 +72,13 @@ def log_server_metric(snap_id, bytes_sent_instant):
     
     threading.Thread(target=write_log, daemon=True).start()
 
+# Global server state
 pending_assign = {}
 pending_acquire_events = {} 
-last_heard = {}
 
 grid = {(r, c): {"state": "UNCLAIMED", "owner": None, "timestamp": 0}
         for r in range(GRID_SIZE) for c in range(GRID_SIZE)}
 
-initial_grid = grid.copy()
 clients: Set[Tuple[str, int]] = set()
 seq_num = 0
 snapshot_id = 0
@@ -87,50 +88,108 @@ is_game_over = False
 last_grid = grid.copy()
 client_last_acked = {}
 
+# Sending functions
 def send_packet(sock, cli, msg_type, snap_id, payload):
     global seq_num
     packet = build_packet(msg_type, snap_id, seq_num, payload)
- #   if msg_type != MSG_SNAPSHOT: print_packet(packet)
     seq_num += 1
     sock.sendto(packet, cli)
-    return len(packet)
+
+    pkt_len = len(packet)
+    
+    if pkt_len > MAX_PACKET_BYTES:
+        print("[WARN] Packet length exceeds limit:", pkt_len)
+        print(f"Packet dump for type {msg_type}, snap_id {snap_id}, seq_num {seq_num-1}:, payload={payload}")
+    
+    log_server_metric(snap_id, pkt_len)
+    
+    return pkt_len
 
 def send_assign_id(sock: socket.socket, addr: Tuple[str, int], pid: str) -> None:
     payload = orjson.dumps({"id": pid})
     send_packet(sock, addr, MSG_ASSIGN_ID, 0, payload)
 
+def send_chunked_snapshot(sock, cli, snap_id, base_payload):
+    pending = [list(base_payload["grid"].items())]
+    parts = []
+
+    while pending:
+        items = pending.pop()
+        if not items:
+            continue
+
+        grid_part = {k: v for (k, v) in items}
+
+        # Build a temporary payload for size-testing
+        test_payload = {
+            "grid": grid_part,
+            "timestamp": base_payload["timestamp"],
+            "is_full": base_payload["is_full"],
+            "total_chunks": 1,
+            "chunk_index": 0
+        }
+
+        raw = orjson.dumps(test_payload)
+
+        if HEADER_SIZE + len(raw) > MAX_PACKET_BYTES and len(items) > 1:
+            mid = len(items) // 2
+            pending.append(items[:mid])
+            pending.append(items[mid:])
+            continue
+
+        parts.append(grid_part)
+
+    total_chunks = len(parts)
+
+    for idx, grid_part in enumerate(parts):
+        real_payload = {
+            "grid": grid_part,
+            "timestamp": base_payload["timestamp"],
+            "is_full": base_payload["is_full"],
+            "total_chunks": total_chunks,
+            "chunk_index": idx
+        }
+
+        payload_bytes = orjson.dumps(real_payload)
+        send_packet(sock, cli, MSG_SNAPSHOT, snap_id, payload_bytes)
+
 def send_full_snapshot(sock, addr):
     global snapshot_id
-    delta = {}
-    for (r, c), cell in grid.items():
-        initial_cell = initial_grid.get((r, c))
-        if initial_cell != cell:
-            delta[f"{r},{c}"] = cell
-    
-    MAX_PAYLOAD_SIZE = 1200
-    test_payload = orjson.dumps({"grid": delta, "timestamp": now_ms(), "is_full": True})
-    
-    if len(test_payload) <= MAX_PAYLOAD_SIZE:
-        send_packet(sock, addr, MSG_SNAPSHOT, snapshot_id, test_payload)
-    else:
-        # Chunking logic (simplified for brevity, assume works as in previous code)
-        pass 
+
+    full_dict = {f"{r},{c}": cell for (r, c), cell in grid.items()}
+
+    base_payload = {
+        "grid": full_dict,
+        "timestamp": now_ms(),
+        "is_full": True
+    }
+
+    send_chunked_snapshot(sock, addr, snapshot_id, base_payload)
+
+    snapshot_id += 1
 
 def send_delta_snapshot(sock):
     global snapshot_id, last_grid
-    delta = compute_delta()
-    payload = orjson.dumps({"grid": delta, "timestamp": now_ms(), "is_full": False})
 
-    bytes_sent_this_tick = 0
-    
-    # Broadcast to all
+    delta: Dict[str, Dict] = {}
+    for (r, c), cell in grid.items():
+        prev = last_grid.get((r, c))
+        if prev != cell:
+            delta[f"{r},{c}"] = cell
+
+    if not delta:
+        snapshot_id += 1
+        return
+
+    base_payload = {
+        "grid": delta,
+        "timestamp": now_ms(),
+        "is_full": False
+    }
+
     for cli in clients:
-        pkt_len = send_packet(sock, cli, MSG_SNAPSHOT, snapshot_id, payload)
-        bytes_sent_this_tick += pkt_len
+        send_chunked_snapshot(sock, cli, snapshot_id, base_payload)
 
-    # Log metrics
-    log_server_metric(snapshot_id, bytes_sent_this_tick)
-    
     snapshot_id += 1
 
 def send_game_over(sock: socket.socket, winner: str, scoreboard: Dict[str, int]) -> None:
@@ -138,6 +197,30 @@ def send_game_over(sock: socket.socket, winner: str, scoreboard: Dict[str, int])
     payload = orjson.dumps({"winner": winner, "scoreboard": scoreboard})
     for cli in clients:
         send_packet(sock, cli, MSG_GAME_OVER, snapshot_id, payload)
+
+# Background threads
+def update_last_grid_when_safe():
+    global last_grid, client_last_acked
+    while True:
+        time.sleep(0.01)
+        if not clients:
+            continue
+
+        min_acked = min(client_last_acked.get(cli, -1) for cli in clients)
+
+        # Advance last_grid only when all have seen up to snapshot_id
+        if min_acked >= snapshot_id - 1:
+            last_grid = grid.copy()
+
+def broadcaster(sock: socket.socket) -> None:
+    while True:
+        if is_game_over: break
+        start = time.time()
+        with lock:
+            send_delta_snapshot(sock)
+        elapsed = time.time() - start
+        if elapsed < BROADCAST_FREQUENCY:
+            time.sleep(BROADCAST_FREQUENCY - elapsed)
 
 def handle_acquire_request(sock: socket.socket, msg: dict, addr: Tuple[str, int]) -> None:
     global grid, is_game_over
@@ -181,46 +264,12 @@ def handle_acquire_request(sock: socket.socket, msg: dict, addr: Tuple[str, int]
         send_game_over(sock, winner, counts)
         print(f"[SERVER - GAME_OVER] Winner: {winner} | Scoreboard: {counts}")
 
-def compute_delta() -> Dict[str, Dict]:
-    global last_grid
-    changed: Dict[str, Dict] = {}
-    for (r, c), cell in grid.items():
-        prev = last_grid.get((r, c))
-        if prev != cell:
-            changed[f"{r},{c}"] = cell
-    return changed
-
-def update_last_grid_when_safe():
-    global last_grid
-    while True:
-        time.sleep(0.01)
-        if not clients:
-            continue
-
-        # smallest acked snapshot among all clients
-        min_acked = min(client_last_acked.get(cli, -1) for cli in clients)
-
-        # Advance last_grid only when all have seen up to snapshot_id
-        if min_acked >= snapshot_id - 1:
-            last_grid = grid.copy()
-
-def broadcaster(sock: socket.socket) -> None:
-    while True:
-        if is_game_over: break
-        start = time.time()
-        with lock:
-            send_delta_snapshot(sock)
-        elapsed = time.time() - start
-        if elapsed < BROADCAST_FREQUENCY:
-            time.sleep(BROADCAST_FREQUENCY - elapsed)
-
 def receiver(sock: socket.socket) -> None:
     global next_id, client_last_acked, pending_assign
     while True:
         try:
             packet, addr = sock.recvfrom(4096)
         except: continue
-        last_heard[addr] = now_ms()
 
         (msg_type, _, _, _, data) = parse_packet(packet)
         
@@ -260,7 +309,6 @@ def receiver(sock: socket.socket) -> None:
                     del pending_acquire_events[eid]
         elif msg_type == MSG_SNAPSHOT_ACK:
             client_last_acked[addr] = data["snapshot_id"]
-
 
 def resend_acquire_events(sock):
     while True:
