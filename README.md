@@ -1,125 +1,170 @@
-# Multiplayer Low-Latency Sync Protocol (MLSP)
+# **Multiplayer Low-Latency Sync Protocol (MLSP)**
 
-A UDP-based multiplayer synchronization protocol designed for real-time 2D grid interaction and low-latency state sharing.
-
----
-
-## Overview
-**MLSP** implements a lightweight, low-latency synchronization layer between a central server and multiple clients (up to four).  
-It supports smooth position and state updates, minimal jitter, and low CPU overhead using event-driven broadcasting and JSON serialization via `orjson`.
-
-Each player sees a shared N×N grid of cells.  
-Clicking a cell sends an `ACQUIRE_REQUEST` to the server.  
-The server validates ownership, updates the authoritative grid, and broadcasts synchronized `SNAPSHOT` messages to all clients.  
-When all cells are acquired, the server declares the winner and halts broadcasting.
+UDP-based multiplayer synchronization for real-time grid interaction and state replication.
 
 ---
 
-## Features
-- **Transport:** UDP (connectionless, low-latency)
-- **Message Types:**  
-  - `INIT` / `ASSIGN_ID` — join handshake  
-  - `ACQUIRE_REQUEST` — player cell claim  
-  - `SNAPSHOT` — state broadcast  
-  - `GAME_OVER` — final result
-- **Server capacity:** 4 concurrent clients  
-- **Update rate:** ~20–50 Hz (configurable)  
-- **Serialization:** `orjson` for high-speed JSON  
-- **Platform support:** Windows, Linux  
+# **1. Overview**
+
+**MLSP** implements a lightweight, low-latency multiplayer synchronization layer between a central authoritative server and multiple clients.
+The system was designed for real-time interaction on an N×N grid, supporting up to **four concurrent players**.
+
+Players click cells to acquire them.
+The server validates ownership, updates the authoritative state, and broadcasts synchronized **SNAPSHOT** messages to all clients at 50 Hz.
+
+When all cells are acquired, the server sends `GAME_OVER`, including the final scoreboard.
 
 ---
 
-## Directory Structure
-```
+# **2. Features**
 
-/src
-├── client.py     # Client GUI and network logic (Tkinter)
-└── server.py     # Authoritative game state and broadcaster
+### **Transport**
 
-/scripts
-├── run_baseline.bat # Windows local baseline test
-└── run_baseline.sh  # Linux local baseline test
+* UDP (connectionless, minimal latency)
+* Orjson serialization for high-speed JSON encoding
 
-```
+### **Protocol Message Types**
+
+| Type                | Direction        | Purpose                             |
+| ------------------- | ---------------- | ----------------------------------- |
+| `MSG_INIT`          | Client → Server  | Request to join                     |
+| `MSG_ASSIGN_ID`     | Server → Client  | Assign player ID                    |
+| `MSG_ASSIGN_ID_ACK` | Client → Server  | Confirm ID received                 |
+| `MSG_SNAPSHOT`      | Server → Client  | Delta or full grid update           |
+| `MSG_SNAPSHOT_ACK`  | Client → Server  | Confirm snapshot received           |
+| `MSG_SNAPSHOT_NACK` | Client → Server  | Request snapshot resend             |
+| `MSG_ACQUIRE_REQ`   | Client → Server  | Attempt to claim a cell             |
+| `MSG_ACQUIRE_EVENT` | Server → Clients | Reliable broadcast of a claim event |
+| `MSG_ACQUIRE_ACK`   | Client → Server  | Confirm acquire event received      |
+| `MSG_GAME_OVER`     | Server → Clients | End-of-game summary                 |
+
+### **Server**
+
+* Authoritative grid state
+* Applies delta-encoding
+* Broadcasts snapshots every 50ms
+* Reliable delivery of acquire events
+* Detects game completion
+
+### **Client**
+
+* GUI grid (Tkinter)
+* Buffered snapshot rendering (60ms delay smoothing)
+* Snapshot watchdog for missing updates
+* Reliable ACKs for events
+* Optional auto-clicker for automated tests
 
 ---
 
-## Running Locally
+# **3. Automated Test Scenarios**
 
-### Windows
-Run the baseline batch file from the project root:
-```bat
-run_local.bat
-```
+All tests run inside **WSL2 using Linux netem** for accurate network impairment simulation.
 
-This script:
+---
 
-1. Starts the MLSP server.
-2. Launches two clients in new terminal windows.
-3. Each client opens a GUI grid for interaction.
+# **3.1 Setup**
 
-### Linux
-
-Make the script executable:
+Enter the project:
 
 ```bash
-chmod +x run_local.sh
+cd ~/multiplayer-low-latency-sync-protocol
 ```
 
-Then run:
+Activate virtual environment:
 
 ```bash
-./run_local.sh
+source venv/bin/activate
 ```
 
-This script:
+Enter scripts folder:
 
-1. Launches the server in a new GNOME terminal.
-2. Starts two client GUIs.
-3. Automatically connects them to `localhost`.
-
----
-
-## Gameplay
-
-1. Each client automatically receives an assigned player ID (1–4).
-2. Players click cells to claim them.
-3. The server resolves conflicts (first-come or earliest timestamp).
-4. Claimed cells are broadcast to all players via `SNAPSHOT`.
-5. When all cells are claimed, the server sends a `GAME_OVER` message announcing the winner.
-
----
-
-## Notes
-
-* Ensure **Python 3.10+** is installed and available in `PATH`.
-* The UDP payload size is capped at 1200 bytes.
-* Both server and client scripts are cross-platform (Windows / Linux / WSL2).
-
----
-
-## Example Output
-
-**Server:**
-
-```
-Server ready on UDP ('0.0.0.0', 40000)
-[INIT] Assigned ID 1 to ('127.0.0.1', 52010)
-[ACQUIRE] 1 claimed cell (0, 0)
-[GAME_OVER] Winner: 1
-```
-
-**Client:**
-
-```
-You are Player 1
-ACQUIRE_REQUEST sent for cell (0, 0)
-[SNAPSHOT] id=21 | claimed=25/25
-[GAME_OVER] Winner: 1 | Scoreboard: {'1': 25}
+```bash
+cd scripts
 ```
 
 ---
 
-## License
+# **3.2 Running All Tests**
 
-Educational use only — part of the **CSE361 Computer Networks Project**.
+Run the automated multi-test script:
+
+```bash
+./run_all_tests.sh
+```
+
+This performs the **five required tests**:
+
+1. Baseline (no impairment)
+2. Packet loss 2%
+3. Packet loss 5%
+4. Delay 100ms
+5. Delay 100ms ± 10ms jitter
+
+For each test, the script:
+
+* Applies the correct `tc netem` rule
+* Launches **server + 4 clients**
+* Runs the test for 20 seconds
+* Saves logs into:
+
+```
+test_results/<TEST_NAME>/
+```
+
+### Example result structure:
+
+```
+test_results/
+    Loss 2%/
+        server_log.csv
+        client_log_1.csv
+        client_log_2.csv
+        client_log_3.csv
+        client_log_4.csv
+```
+
+---
+
+# **4. Log Contents**
+
+### **Server logs include:**
+
+* CPU load
+* Snapshot ID
+* Snapshot bandwidth
+* Authoritative state JSON
+
+### **Client logs include:**
+
+* Snapshot ID
+* Latency
+* Jitter
+* Sequence numbers
+* Perceived state
+
+---
+
+# **5. Gameplay Flow**
+
+1. Client sends `INIT`
+2. Server assigns ID
+3. Client confirms
+4. Server sends full snapshot
+5. Client uses delta updates to stay synced
+6. Players click cells → server resolves ownership
+7. Server reliably broadcasts acquire events
+8. When all cells are owned → server sends `GAME_OVER`
+
+---
+
+# **6. System Requirements**
+
+* Python **3.10+**
+* Tkinter (**already included** in our environment)
+* orjson, psutil (installed in venv)
+
+---
+
+# **10. License**
+
+Educational use — CSE361 Computer Networks Project.
