@@ -1,7 +1,6 @@
 import json
 import socket
 import threading
-import time
 from constants import (
     MSG_INIT,
     MSG_ASSIGN_ID,
@@ -22,6 +21,8 @@ from helpers import get_local_ipv4, now_ms
 from packet_helper import build_packet, parse_packet, print_packet
 import client_gui
 from collections import deque
+import random
+import time
 
 snapshot_buffer = deque()
 RENDER_DELAY_MS = 60
@@ -52,8 +53,14 @@ def init_client_log():
     """Initialize the client log file with headers."""
     if player_id[0] is None:
         return
-    
-    log_file = f"test_results/client_log_{player_id[0]}.csv"
+        
+    test_name = os.environ.get("CURRENT_TEST_NAME", "default_test")
+
+    folder = os.path.join("test_results", test_name)
+    os.makedirs(folder, exist_ok=True)
+
+    log_file = os.path.join(folder, f"client_log_{player_id[0]}.csv")
+   
     if not os.path.exists(log_file):
         with open(log_file, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
@@ -152,18 +159,30 @@ def send_snapshot_nack(sock, snapshot_id):
 def snapshot_watchdog(sock):
     global last_snapshot_time, latest_snapshot, game_over
 
-    expected = BROADCAST_FREQUENCY * 1000
-    timeout = int(expected * 1.2)
+    # Wait until ID assigned
+    while player_id[0] is None:
+        time.sleep(0.05)
+
+    # Wait for first snapshot
+    while latest_snapshot < 0:
+        time.sleep(0.05)
+
+    timeout = BROADCAST_FREQUENCY * 1000
+    last_nack_time = 0
 
     while True:
         if game_over:
             return
-        
+
         now = now_ms()
-        if last_snapshot_time != 0 and now - last_snapshot_time > timeout:
+
+        if now - last_snapshot_time > timeout and now - last_nack_time > timeout:
+            print("[WATCHDOG] Sending NACK for snapshot", latest_snapshot)
             send_snapshot_nack(sock, latest_snapshot)
-            last_snapshot_time = now
-        time.sleep(BROADCAST_FREQUENCY)
+            last_nack_time = now
+
+        time.sleep(timeout)
+
 
 def snapshot_applier():
     while True:
@@ -204,12 +223,12 @@ def receiver(sock: socket.socket):
         if data is None:
              continue
 
-        if msg_type == MSG_ASSIGN_ID:
+        if msg_type == MSG_ASSIGN_ID and player_id[0] is None:
             player_id[0] = data["id"]
             send_assign_ack(sock)
             client_gui.update_window_title(player_id[0])
-            # log_file = init_client_log()
-            # print(f"Client logging to {log_file}")
+            log_file = init_client_log()
+            print(f"Client logging to {log_file}")
             continue
 
         if msg_type == MSG_SNAPSHOT:
@@ -285,6 +304,21 @@ def init_resender(sock):
         send_init(sock)
         time.sleep(0.3)
 
+def random_clicker(sock):
+    global player_id, game_over
+    if os.environ.get("ENABLE_RANDOM_CLICKS") != "1":
+        return
+
+    while player_id[0] is None:
+        time.sleep(0.05)
+
+    while not game_over:
+        r = random.randint(0, GRID_SIZE - 1)
+        c = random.randint(0, GRID_SIZE - 1)
+        send_acquire_request(sock, player_id[0], (r, c))
+        time.sleep(random.uniform(0.2, 0.6))
+
+
 def main():
     global player_id, sock, SERVER
 
@@ -295,7 +329,7 @@ def main():
     client_gui.setup_gui()
 
     threading.Thread(target=receiver, args=(sock,), daemon=True).start()
-   # threading.Thread(target=snapshot_watchdog, args=(sock,), daemon=True).start()
+    threading.Thread(target=snapshot_watchdog, args=(sock,), daemon=True).start()
     threading.Thread(target=snapshot_applier, daemon=True).start()
 
     if Deployment:
@@ -303,9 +337,9 @@ def main():
     else:
         SERVER = (get_local_ipv4(), 40000)
     
-   # threading.Thread(target=init_resender, args=(sock,), daemon=True).start()
-    send_init(sock)
-
+    threading.Thread(target=init_resender, args=(sock,), daemon=True).start()
+    threading.Thread(target=random_clicker, args=(sock,), daemon=True).start()
+    
     try:
         client_gui.start_gui()
     finally:
