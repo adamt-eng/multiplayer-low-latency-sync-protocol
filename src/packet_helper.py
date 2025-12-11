@@ -2,22 +2,13 @@ import json
 import struct
 import zlib
 from helpers import now_ms
-import constants
-
-PROTOCOL_ID = constants.PROTOCOL_ID
-VERSION = constants.VERSION
-
-MSG_INIT = constants.MSG_INIT
-MSG_ASSIGN_ID = constants.MSG_ASSIGN_ID
-MSG_SNAPSHOT = constants.MSG_SNAPSHOT
-MSG_ACQUIRE_REQ = constants.MSG_ACQUIRE_REQ
-MSG_SNAPSHOT_ACK = constants.MSG_SNAPSHOT_ACK
-MSG_GAME_OVER = constants.MSG_GAME_OVER
-
-HEADER_FMT = constants.HEADER_FMT
-HEADER_SIZE = constants.HEADER_SIZE
-GRID_SIZE = constants.GRID_SIZE
-
+from constants import (
+    PROTOCOL_ID,
+    VERSION,
+    HEADER_FMT,
+    HEADER_SIZE,
+    MAX_PACKET_BYTES
+    )
 
 def print_packet(packet: bytes) -> None:
     (
@@ -44,7 +35,13 @@ def print_packet(packet: bytes) -> None:
 
     
 def build_packet(msg_type: int, snap_id: int, seq: int, payload: bytes) -> bytes:
+    if HEADER_SIZE + len(payload) > MAX_PACKET_BYTES:
+        raise ValueError(
+            f"Total packet size would be too large: header({HEADER_SIZE}) + payload({len(payload)}) > {max_total}"
+        )
+
     ts = now_ms()
+
     temp_header = struct.pack(
         HEADER_FMT,
         PROTOCOL_ID,
