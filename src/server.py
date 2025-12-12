@@ -187,7 +187,7 @@ def send_delta_snapshot(sock):
         "is_full": False
     }
 
-    for cli in clients:
+    for cli in list(clients):
         send_chunked_snapshot(sock, cli, snapshot_id, base_payload)
 
     snapshot_id += 1
@@ -295,20 +295,24 @@ def receiver(sock: socket.socket) -> None:
             with lock: send_delta_snapshot(sock)
             
         elif msg_type == MSG_ASSIGN_ID_ACK:
-            if addr in pending_assign:
-                pid = pending_assign[addr][0]
-                clients.add(addr)
-                del pending_assign[addr]
-                print(f"[SERVER] Client {addr} activated as ID {pid}")
+            with lock:
+                if addr in pending_assign:
+                    pid = pending_assign[addr][0]
+                    clients.add(addr)
+                    client_last_acked[addr] = -1
+                    del pending_assign[addr]
+                    print(f"[SERVER] Client {addr} activated as ID {pid}")
 
         elif msg_type == MSG_ACQUIRE_ACK:
-            eid = data["event_id"]
-            if eid in pending_acquire_events:
-                pending_acquire_events[eid]["acks"][addr] = True
-                if all(pending_acquire_events[eid]["acks"].values()):
-                    del pending_acquire_events[eid]
+            with lock:
+                eid = data["event_id"]
+                if eid in pending_acquire_events:
+                    pending_acquire_events[eid]["acks"][addr] = True
+                    if all(pending_acquire_events[eid]["acks"].values()):
+                        del pending_acquire_events[eid]
         elif msg_type == MSG_SNAPSHOT_ACK:
-            client_last_acked[addr] = data["snapshot_id"]
+            with lock:
+               client_last_acked[addr] = data["snapshot_id"]
 
 def resend_acquire_events(sock):
     while True:
@@ -321,11 +325,12 @@ def resend_acquire_events(sock):
 def resend_assign_id(sock):
     while True:
         now = now_ms()
-        for addr in list(pending_assign.keys()):
-            pid, last_sent = pending_assign[addr]
-            if now - last_sent > 300:
-                send_assign_id(sock, addr, pid)
-                pending_assign[addr][1] = now
+        with lock:
+            for addr in list(pending_assign.keys()):
+                pid, last_sent = pending_assign[addr]
+                if now - last_sent > 300:
+                    send_assign_id(sock, addr, pid)
+                    pending_assign[addr][1] = now
         time.sleep(0.05)
 
 def main() -> None:
