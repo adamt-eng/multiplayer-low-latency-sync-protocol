@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # --- Configuration ---
-TEST_RESULTS_DIR = "test_results"
+TEST_RESULTS_DIR = "scripts/test_results"
 OUTPUT_CSV = "experiment_results_final.csv"
 GRAPHS_DIR = "performance_graphs"
 
