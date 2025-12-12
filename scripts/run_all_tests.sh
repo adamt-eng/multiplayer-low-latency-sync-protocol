@@ -1,4 +1,8 @@
 IF=lo
+PORT=40000
+PCAP_DIR=pcaps
+
+mkdir -p $PCAP_DIR
 
 # Commands to start server/clients
 START_SERVER="python3 ../src/server.py"
@@ -13,6 +17,8 @@ DURATION=10
 run_test() {
     NAME=$1
     NETEM_CMD=$2
+    SAFE_NAME=$(echo "$NAME" | tr ' /±%' '____')
+    PCAP_FILE="$PCAP_DIR/${SAFE_NAME}.pcap"
 
     echo "======================================="
     echo "Running Test: $NAME"
@@ -28,6 +34,12 @@ run_test() {
 
     export ENABLE_RANDOM_CLICKS=1
     export CURRENT_TEST_NAME="$NAME"
+
+    # Start packet capture
+    sudo tcpdump -i $IF -w "$PCAP_FILE" udp port $PORT >/dev/null 2>&1 &
+    TCPDUMP_PID=$!
+
+    sleep 0.5
 
     # Start server
     bash -c "$START_SERVER" &
@@ -46,9 +58,11 @@ run_test() {
     sleep $DURATION
 
     pkill -f python
+    sudo kill $TCPDUMP_PID
 
     sudo tc qdisc del dev $IF root 2>/dev/null
-
+    
+    echo "PCAP saved to: $PCAP_FILE"
     echo "Test completed: $NAME"
     echo
 }
