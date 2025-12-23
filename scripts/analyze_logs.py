@@ -7,9 +7,10 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 # --- Configuration ---
-TEST_RESULTS_DIR = "scripts/test_results"
+TEST_RESULTS_DIR = "test_results"
 OUTPUT_CSV = "experiment_results_final.csv"
 GRAPHS_DIR = "performance_graphs"
+INDIVIDUAL_GRAPHS_DIR = "test_results"  # Generate plots in each test folder
 
 def calculate_state_error(server_json, client_json):
     """
@@ -103,6 +104,163 @@ def process_test_folder(test_folder_path):
         return pd.concat(all_results, ignore_index=True)
     return None
 
+def generate_individual_plots(test_name, df, output_dir):
+    """Generate detailed plots for a single test scenario."""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Plot 1: Latency over time
+    fig, ax = plt.subplots(figsize=(14, 6))
+    time_seconds = df['snapshot_id'].values * 0.05
+    ax.scatter(time_seconds, df['latency_ms'].values, alpha=0.4, s=15, color='steelblue', label='Latency')
+    
+    if len(df) > 10:
+        rolling_avg = pd.Series(df['latency_ms'].values).rolling(window=10, center=True).mean()
+        ax.plot(time_seconds, rolling_avg, color='red', linewidth=2.5, label='10-packet Moving Average', alpha=0.9)
+    
+    ax.set_xlabel("Time (seconds)", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Latency (ms)", fontsize=12, fontweight='bold')
+    ax.set_title(f"{test_name} - Latency Over Time", fontsize=14, fontweight='bold')
+    ax.legend(fontsize=11)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "latency_timeseries.png"), dpi=150)
+    plt.close()
+    
+    # Plot 2: Latency CDF
+    fig, ax = plt.subplots(figsize=(10, 6))
+    latencies = np.sort(df['latency_ms'].values)
+    cumulative_pct = np.arange(1, len(latencies) + 1) / len(latencies) * 100
+    
+    ax.plot(latencies, cumulative_pct, linewidth=3, color='darkblue', marker='o', markersize=2, alpha=0.6)
+    ax.set_xlabel("Latency (ms)", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Cumulative Percentage (%)", fontsize=12, fontweight='bold')
+    ax.set_title(f"{test_name} - Latency CDF", fontsize=14, fontweight='bold')
+    ax.grid(alpha=0.3)
+    ax.set_ylim([0, 100])
+    
+    p50 = np.percentile(df['latency_ms'], 50)
+    p95 = np.percentile(df['latency_ms'], 95)
+    p99 = np.percentile(df['latency_ms'], 99)
+    
+    ax.axvline(p50, color='green', linestyle='--', linewidth=2, alpha=0.7, label=f'p50: {p50:.1f}ms')
+    ax.axvline(p95, color='orange', linestyle='--', linewidth=2, alpha=0.7, label=f'p95: {p95:.1f}ms')
+    ax.axvline(p99, color='red', linestyle='--', linewidth=2, alpha=0.7, label=f'p99: {p99:.1f}ms')
+    ax.legend(fontsize=11)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "latency_cdf.png"), dpi=150)
+    plt.close()
+    
+    # Plot 3: Jitter over time
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.scatter(time_seconds, df['jitter_ms'].values, alpha=0.4, s=15, color='coral', label='Jitter')
+    
+    if len(df) > 10:
+        rolling_avg = pd.Series(df['jitter_ms'].values).rolling(window=10, center=True).mean()
+        ax.plot(time_seconds, rolling_avg, color='darkred', linewidth=2.5, label='10-packet Moving Average', alpha=0.9)
+    
+    ax.set_xlabel("Time (seconds)", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Jitter (ms)", fontsize=12, fontweight='bold')
+    ax.set_title(f"{test_name} - Jitter Over Time (Latency Variation)", fontsize=14, fontweight='bold')
+    ax.legend(fontsize=11)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "jitter_timeseries.png"), dpi=150)
+    plt.close()
+    
+    # Plot 4: State Error over time
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.scatter(time_seconds, df['perceived_position_error'].values, alpha=0.4, s=15, color='lightcoral', label='State Error')
+    
+    if len(df) > 10:
+        rolling_avg = pd.Series(df['perceived_position_error'].values).rolling(window=10, center=True).mean()
+        ax.plot(time_seconds, rolling_avg, color='darkred', linewidth=2.5, label='10-packet Moving Average', alpha=0.9)
+    
+    ax.set_xlabel("Time (seconds)", fontsize=12, fontweight='bold')
+    ax.set_ylabel("State Error (mismatched cells)", fontsize=12, fontweight='bold')
+    ax.set_title(f"{test_name} - Grid State Synchronization Error Over Time", fontsize=14, fontweight='bold')
+    ax.legend(fontsize=11)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "state_error_timeseries.png"), dpi=150)
+    plt.close()
+    
+    # Plot 5: Latency histogram
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(df['latency_ms'].values, bins=30, color='steelblue', alpha=0.7, edgecolor='black')
+    ax.axvline(df['latency_ms'].mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {df["latency_ms"].mean():.2f}ms')
+    ax.axvline(df['latency_ms'].median(), color='green', linestyle='--', linewidth=2, label=f'Median: {df["latency_ms"].median():.2f}ms')
+    ax.set_xlabel("Latency (ms)", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Frequency", fontsize=12, fontweight='bold')
+    ax.set_title(f"{test_name} - Latency Distribution", fontsize=14, fontweight='bold')
+    ax.legend(fontsize=11)
+    ax.grid(alpha=0.3, axis='y')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "latency_histogram.png"), dpi=150)
+    plt.close()
+    
+    # Plot 6: Bandwidth over time
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.scatter(time_seconds, df['bandwidth_per_client_kbps'].values, alpha=0.4, s=15, color='lightgreen', label='Bandwidth')
+    
+    if len(df) > 10:
+        rolling_avg = pd.Series(df['bandwidth_per_client_kbps'].values).rolling(window=10, center=True).mean()
+        ax.plot(time_seconds, rolling_avg, color='darkgreen', linewidth=2.5, label='10-packet Moving Average', alpha=0.9)
+    
+    ax.set_xlabel("Time (seconds)", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Bandwidth per Client (Kbps)", fontsize=12, fontweight='bold')
+    ax.set_title(f"{test_name} - Bandwidth Usage Over Time", fontsize=14, fontweight='bold')
+    ax.legend(fontsize=11)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "bandwidth_timeseries.png"), dpi=150)
+    plt.close()
+    
+    # Plot 7: Summary statistics
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.axis('off')
+    
+    stats_text = f"""
+    {test_name}
+    {'='*60}
+    
+    LATENCY STATISTICS
+    Mean:       {df['latency_ms'].mean():.2f} ms
+    Median:     {df['latency_ms'].median():.2f} ms
+    Std Dev:    {df['latency_ms'].std():.2f} ms
+    Min:        {df['latency_ms'].min():.2f} ms
+    Max:        {df['latency_ms'].max():.2f} ms
+    95th %ile:  {df['latency_ms'].quantile(0.95):.2f} ms
+    99th %ile:  {df['latency_ms'].quantile(0.99):.2f} ms
+    
+    JITTER STATISTICS (Latency Variation)
+    Mean:       {df['jitter_ms'].mean():.2f} ms
+    Median:     {df['jitter_ms'].median():.2f} ms
+    95th %ile:  {df['jitter_ms'].quantile(0.95):.2f} ms
+    
+    STATE ERROR STATISTICS (Mismatched Cells)
+    Mean:       {df['perceived_position_error'].mean():.2f}
+    Median:     {df['perceived_position_error'].median():.2f}
+    Max:        {df['perceived_position_error'].max():.0f}
+    95th %ile:  {df['perceived_position_error'].quantile(0.95):.2f}
+    
+    BANDWIDTH STATISTICS
+    Mean:       {df['bandwidth_per_client_kbps'].mean():.2f} Kbps
+    Median:     {df['bandwidth_per_client_kbps'].median():.2f} Kbps
+    Max:        {df['bandwidth_per_client_kbps'].max():.2f} Kbps
+    
+    Total Snapshots: {len(df)}
+    """
+    
+    ax.text(0.1, 0.95, stats_text, transform=ax.transAxes, fontsize=11,
+            verticalalignment='top', fontfamily='monospace',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "statistics_summary.png"), dpi=150)
+    plt.close()
+    
+    print(f"  ✓ Generated 7 plots in {output_dir}")
+
 def main():
     # Create output directory for graphs
     os.makedirs(GRAPHS_DIR, exist_ok=True)
@@ -133,6 +291,10 @@ def main():
             }
             
             print(f"  ✓ Loaded {len(df)} records")
+            
+            # Generate individual plots for this test scenario
+            graphs_subdir = os.path.join(test_path, "graphs")
+            generate_individual_plots(test_name, df, graphs_subdir)
     
     if not all_test_results:
         print("No valid test data found.")
