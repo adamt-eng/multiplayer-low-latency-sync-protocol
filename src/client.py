@@ -30,7 +30,6 @@ RENDER_DELAY_MS = 60
 player_id = [None] 
 
 game_over = False
-Deployment = False
 SERVER = None
 
 grid = {(r, c): {"state": "UNCLAIMED", "owner": None}
@@ -324,10 +323,7 @@ def main():
     threading.Thread(target=snapshot_watchdog, args=(sock,), daemon=True).start()
     threading.Thread(target=snapshot_applier, daemon=True).start()
 
-    if Deployment:
-        SERVER = ("", 40000)
-    else:
-        SERVER = (get_local_ipv4(), 40000)
+    SERVER = (get_local_ipv4(), 40000)
     
     threading.Thread(target=init_resender, args=(sock,), daemon=True).start()
     threading.Thread(target=random_clicker, args=(sock,), daemon=True).start()
